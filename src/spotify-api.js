@@ -312,7 +312,8 @@ class SpotifyAPI {
      */
     async saveToLibrary(urisOrIds, entityType = 'track') {
         const uris = this.normalizeUris(urisOrIds, entityType);
-        await this.request('PUT', '/me/library', { uris });
+        const encodedUris = encodeURIComponent(uris.join(','));
+        await this.request('PUT', `/me/library?uris=${encodedUris}`);
         this.logger.info(`[SpotifyAPI] Saved ${uris.length} item(s) to library`);
     }
 
@@ -321,7 +322,8 @@ class SpotifyAPI {
      */
     async removeFromLibrary(urisOrIds, entityType = 'track') {
         const uris = this.normalizeUris(urisOrIds, entityType);
-        await this.request('DELETE', '/me/library', { uris });
+        const encodedUris = encodeURIComponent(uris.join(','));
+        await this.request('DELETE', `/me/library?uris=${encodedUris}`);
         this.logger.info(`[SpotifyAPI] Removed ${uris.length} item(s) from library`);
     }
 
