@@ -1,0 +1,10 @@
+node_modules
+logs
+.vscode
+.env
+package-lock.json
+com.eniac.spotifyplugin.plugin/backend
+.DS_Store
+*.flexplugin
+com.jennergray.lyricsnow.plugin/backend
+com.jennergray.lyricsnow.plugin/config.json
