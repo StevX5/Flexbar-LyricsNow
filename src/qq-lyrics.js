@@ -3,7 +3,8 @@ const zlib = require('zlib');
 const querystring = require('querystring');
 
 const QQ_3DES_KEY = Buffer.from('!@#)(*$%123ZXC!@!@#)(NHL', 'utf8');
-const QQ_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15';
+const QQ_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.132 Safari/537.36';
+const QQ_COOKIE = 'os=pc;osver=Microsoft-Windows-10-Professional-build-16299.125-64bit;appver=2.0.3.131777;channel=netease;__remember_me=true';
 const LONG_GAP_DOTS_THRESHOLD_MS = 5000;
 const TRAILING_TAIL_TRIM_SLACK_MS = 120;
 const DES_ENCRYPT = 1;
@@ -679,6 +680,44 @@ function parseTranslationLrc(raw) {
     return map;
 }
 
+function normalizeSingerList(value) {
+    if (Array.isArray(value)) {
+        return value.map((item) => {
+            if (!item) return null;
+            if (typeof item === 'string') return { name: item };
+            return { name: item.name || item.title || item.singerName || '' };
+        }).filter((item) => item && item.name);
+    }
+
+    if (typeof value === 'string' && value.trim()) {
+        return value.split(/[\/,&]/).map((name) => ({ name: name.trim() })).filter((item) => item.name);
+    }
+
+    return [];
+}
+
+function normalizeQqSearchSong(item) {
+    if (!item || typeof item !== 'object') return null;
+
+    const songmid = item.songmid || item.mid || item.songMid || item.music_mid || '';
+    const songid = item.songid || item.id || item.songId || item.musicid || 0;
+    const songname = item.songname || item.title || item.name || item.songName || '';
+    const albumname = item.albumname || item.album?.name || item.albumName || item.album_title || '';
+    const singer = normalizeSingerList(item.singer || item.singers || item.artist || item.artists);
+
+    if (!songmid && !songid) return null;
+    if (!songname) return null;
+
+    return {
+        ...item,
+        songmid,
+        songid,
+        songname,
+        albumname,
+        singer
+    };
+}
+
 function parseLrcLines(raw) {
     if (!raw) return [];
 
@@ -1148,30 +1187,43 @@ class QQLyricsService {
         const seen = new Set();
 
         for (let page = 1; page <= Math.max(1, pageCount); page += 1) {
-            const response = await axios.get('https://c.y.qq.com/soso/fcgi-bin/client_search_cp', {
-                params: {
-                    w: query,
-                    format: 'json',
-                    n: Math.max(1, pageSize),
-                    p: page,
-                    cr: 1,
-                    t: 0,
-                    g_tk: 5381
-                },
+            const payload = {
+                req_1: {
+                    method: 'DoSearchForQQMusicDesktop',
+                    module: 'music.search.SearchCgiService',
+                    param: {
+                        num_per_page: String(Math.max(1, pageSize)),
+                        page_num: String(page),
+                        query,
+                        search_type: 0
+                    }
+                }
+            };
+
+            const response = await axios.post('https://u.y.qq.com/cgi-bin/musicu.fcg', payload, {
                 headers: {
-                    Referer: 'https://y.qq.com',
-                    'User-Agent': QQ_USER_AGENT
+                    Referer: 'https://c.y.qq.com/',
+                    'User-Agent': QQ_USER_AGENT,
+                    Cookie: QQ_COOKIE,
+                    'Content-Type': 'application/json'
                 }
             });
 
-            const list = response.data?.data?.song?.list || [];
+            const body = response.data?.req_1?.data?.body
+                || response.data?.['music.search.SearchCgiService']?.data?.body
+                || response.data?.data?.body
+                || response.data?.body
+                || {};
+            const list = body.song?.list || body.item_song?.list || body.list || [];
             if (!list.length) break;
 
             for (const item of list) {
-                const key = item.songmid || String(item.songid || '');
+                const normalized = normalizeQqSearchSong(item);
+                if (!normalized) continue;
+                const key = normalized.songmid || String(normalized.songid || '');
                 if (!key || seen.has(key)) continue;
                 seen.add(key);
-                results.push(item);
+                results.push(normalized);
             }
         }
 
