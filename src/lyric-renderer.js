@@ -262,10 +262,10 @@ class LyricRenderer {
         const maxWidth = width - paddingHorizontal * 2;
         const isNoPlayback = !songInfo?.title;
         const title = songInfo?.title
-            ? `${songInfo.title}${lyricPackage?.status === 'missing' ? ' - 暂无歌词' : ''}`
-            : 'Waiting for playback';
+            ? `${songInfo.title}${lyricPackage?.status === 'missing' ? ' - Keine Lyrics gefunden' : ''}`
+            : 'Warte auf Wiedergabe';
         const secondary = isNoPlayback
-            ? '暂未播放'
+            ? 'Keine Antwort von Spotify-API'
             : (songInfo?.artist && songInfo?.album
                 ? `${songInfo.artist} - ${songInfo.album}`
                 : songInfo?.artist || songInfo?.album || '');
