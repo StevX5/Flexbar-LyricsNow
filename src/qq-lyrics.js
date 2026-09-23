@@ -10,6 +10,8 @@ const TRAILING_TAIL_TRIM_SLACK_MS = 120;
 const DES_ENCRYPT = 1;
 const DES_DECRYPT = 0;
 const LRCLIB_BASE_URL = 'https://lrclib.net/api';
+const LRCLIB_TIMEOUT_MS = 5000;
+const LRCLIB_CLIENT = 'flexbar-lyricsnow/1.0';
 
 const SBOX1 = [
     14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7,
@@ -946,20 +948,16 @@ class QQLyricsService {
         }
 
         try {
-            const lyrics = await this.fetchAndParse(track.name, artist, album);
+            // Use LRCLIB directly. The old QQ Music lookup could block for a long
+            // time before reaching the fallback provider. Keeping a single,
+            // bounded provider makes lyric loading predictable.
+            const lyrics = await this.fetchFromLrclib(track.name, artist, album, Number.isFinite(track.duration_ms) ? track.duration_ms / 1000 : null);
             this.cache.set(cacheKey, lyrics);
             return lyrics;
         } catch (err) {
-            this.logger.error(`[QQLyrics] Failed to load lyrics: ${err.message}`);
-            try {
-                const fallbackLyrics = await this.fetchFromLrclib(track.name, artist, album);
-                this.cache.set(cacheKey, fallbackLyrics);
-                return fallbackLyrics;
-            } catch (fallbackErr) {
-                this.logger.error(`[LRCLIB] Fallback failed: ${fallbackErr.message}`);
-                this.cache.set(cacheKey, null);
-                return null;
-            }
+            this.logger.error(`[LRCLIB] Failed to load lyrics: ${err.message}`);
+            this.cache.set(cacheKey, null);
+            return null;
         }
     }
 
@@ -1070,7 +1068,7 @@ class QQLyricsService {
     }
 
     async fetchFromLrclib(song, artist, album) {
-        const exact = await this.getLrclibExact(song, artist, album);
+        const exact = await this.getLrclibExact(song, artist, album, null);
         const candidate = exact || await this.searchLrclib(song, artist, album);
         if (!candidate) {
             this.logger.warn(`[LRCLIB] No lyrics found for "${song}" / "${artist}"`);
@@ -1105,17 +1103,24 @@ class QQLyricsService {
         };
     }
 
-    async getLrclibExact(song, artist, album) {
+    async getLrclibExact(song, artist, album, durationSeconds = null) {
         try {
+            const params = {
+                track_name: song,
+                artist_name: artist
+            };
+            if (album) params.album_name = album;
+            if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+                params.duration = Math.round(durationSeconds);
+            }
+
             const response = await axios.get(`${LRCLIB_BASE_URL}/get`, {
-                params: {
-                    track_name: song,
-                    artist_name: artist,
-                    album_name: album || undefined
-                },
+                params,
                 headers: {
-                    'User-Agent': QQ_USER_AGENT
+                    'User-Agent': QQ_USER_AGENT,
+                    'Lrclib-Client': LRCLIB_CLIENT
                 },
+                timeout: LRCLIB_TIMEOUT_MS,
                 validateStatus: () => true
             });
 
@@ -1133,49 +1138,52 @@ class QQLyricsService {
         try {
             const response = await axios.get(`${LRCLIB_BASE_URL}/search`, {
                 params: {
+                    q: `${song} ${artist}`,
                     track_name: song,
                     artist_name: artist,
-                    album_name: album || undefined
+                    ...(album ? { album_name: album } : {})
                 },
                 headers: {
-                    'User-Agent': QQ_USER_AGENT
-                }
+                    'User-Agent': QQ_USER_AGENT,
+                    'Lrclib-Client': LRCLIB_CLIENT
+                },
+                timeout: LRCLIB_TIMEOUT_MS
             });
 
             const rows = Array.isArray(response.data) ? response.data : [];
             if (!rows.length) return null;
 
-            const targetTitleTokens = tokenSet(normalizeForScore(toSimplifiedChinese(song)));
-            const targetArtistTokens = tokenSet(normalizeForMatch(toSimplifiedChinese(artist)));
-            const targetAlbumTokens = tokenSet(normalizeForScore(toSimplifiedChinese(album)));
+            const targetTitle = normalizeForScore(toSimplifiedChinese(song));
+            const targetArtist = normalizeForMatch(toSimplifiedChinese(artist));
+            const targetAlbum = normalizeForScore(toSimplifiedChinese(album));
 
             const ranked = rows.map((candidate) => {
                 const title = candidate.trackName || candidate.name || '';
                 const artistName = candidate.artistName || candidate.artist || '';
                 const albumName = candidate.albumName || candidate.album || '';
-                const titleSim = jaccardSimilarity(tokenSet(normalizeForScore(title)), targetTitleTokens);
-                const artistSim = targetArtistTokens.size
-                    ? jaccardSimilarity(tokenSet(normalizeForMatch(artistName)), targetArtistTokens)
+                const titleSim = jaccardSimilarity(tokenSet(normalizeForScore(title)), tokenSet(targetTitle));
+                const artistSim = targetArtist
+                    ? jaccardSimilarity(tokenSet(normalizeForMatch(toSimplifiedChinese(artistName))), tokenSet(targetArtist))
                     : 0;
-                const albumSim = targetAlbumTokens.size
-                    ? jaccardSimilarity(tokenSet(normalizeForScore(albumName)), targetAlbumTokens)
+                const albumSim = targetAlbum
+                    ? jaccardSimilarity(tokenSet(normalizeForScore(toSimplifiedChinese(albumName))), tokenSet(targetAlbum))
                     : 0;
 
-                let bonus = 0;
-                if (normalizeForScore(title) === normalizeForScore(song)) bonus += 0.2;
-                if (artistSim === 0 && targetArtistTokens.size) bonus -= 0.25;
+                let score = titleSim * 0.55 + artistSim * 0.35 + albumSim * 0.10;
+                if (normalizeForScore(title) === targetTitle) score += 0.20;
+                if (targetArtist && normalizeForMatch(toSimplifiedChinese(artistName)) === targetArtist) score += 0.20;
+                if (!candidate.syncedLyrics) score -= 0.10;
 
-                const score = Math.max(0, Math.min(1, titleSim * 0.55 + artistSim * 0.3 + albumSim * 0.15 + bonus));
                 return { candidate, score };
             }).sort((a, b) => b.score - a.score);
 
             for (const { candidate, score } of ranked.slice(0, 3)) {
                 this.logger.info(
-                    `[LRCLIB] Candidate score=${score.toFixed(3)} title="${candidate.trackName || candidate.name || ''}" artist="${candidate.artistName || candidate.artist || ''}" album="${candidate.albumName || candidate.album || ''}" id="${candidate.id || ''}"`
+                    `[LRCLIB] Candidate score=${score.toFixed(3)} title="${candidate.trackName || candidate.name || ''}" artist="${candidate.artistName || candidate.artist || ''}" album="${candidate.albumName || candidate.album || ''}" id="${candidate.id || ''}" synced=${!!candidate.syncedLyrics}`
                 );
             }
 
-            return ranked[0]?.score > 0 ? ranked[0].candidate : null;
+            return ranked[0]?.score >= 0.35 ? ranked[0].candidate : null;
         } catch (err) {
             this.logger.warn(`[LRCLIB] Search failed: ${err.message}`);
             return null;

@@ -237,7 +237,9 @@ async function loadLyricsForTrack(track) {
     const requestId = ++lyricLoadRequestId;
 
     try {
+        // Use LRCLIB only. Do not query Spotify's undocumented lyrics endpoint.
         const lyrics = await qqLyricsService.getLyricsForTrack(track);
+
         if (requestId !== lyricLoadRequestId || currentTrackId !== track.id) {
             return;
         }
@@ -246,15 +248,16 @@ async function loadLyricsForTrack(track) {
         currentLyrics = lyrics?.lines?.length
             ? createLyricState('ready', lyrics)
             : createLyricState('missing', lyrics);
-        logger.info(`[Plugin] Lyrics ${lyrics?.lines?.length ? 'loaded' : 'not found'} for ${track.name}`);
+        logger.info(`[Plugin] LRCLIB lyrics ${lyrics?.lines?.length ? 'loaded' : 'not found'} for ${track.name}`);
         syncLyricRenderTimer();
         await updateLyricKeys();
     } catch (err) {
         if (requestId !== lyricLoadRequestId) return;
-        logger.error(`[Plugin] Failed to load lyrics: ${err.message}`);
-        currentLyrics = createLyricState('unknown');
+        logger.error(`[Plugin] LRCLIB lyrics failed: ${err.message}`);
+        currentLyrics = createLyricState('missing');
         currentLyricsTrackId = track.id;
         syncLyricRenderTimer();
+        await updateLyricKeys();
     }
 }
 

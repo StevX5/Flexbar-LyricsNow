@@ -162,6 +162,108 @@ class SpotifyAPI {
     }
 
     /**
+     * Get the lyrics shown by Spotify for a track.
+     *
+     * Spotify does not expose lyrics through the public Web API. The
+     * official clients use the internal color-lyrics endpoint instead.
+     * This is intentionally best-effort; callers should keep their own
+     * lyrics provider as a fallback.
+     */
+    async getSpotifyLyrics(trackId, retry = true) {
+        if (!trackId) return null;
+
+        if (this.needsRefresh()) {
+            await this.refreshAccessToken();
+        }
+
+        if (!this.accessToken) {
+            throw new Error('Not authenticated');
+        }
+
+        const url = `https://spclient.wg.spotify.com/color-lyrics/v2/track/${encodeURIComponent(trackId)}`;
+
+        try {
+            const response = await axios.get(url, {
+                params: {
+                    format: 'json',
+                    vocalRemoval: false,
+                    market: 'from_token'
+                },
+                headers: {
+                    'Authorization': `Bearer ${this.accessToken}`,
+                    'App-Platform': 'WebPlayer',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+                    'Accept': 'application/json'
+                },
+                validateStatus: () => true
+            });
+
+            if (response.status === 404) {
+                this.logger.info(`[SpotifyAPI] No Spotify lyrics for track ${trackId}`);
+                return null;
+            }
+
+            if (response.status === 401 && retry) {
+                this.logger.warn('[SpotifyAPI] Spotify lyrics endpoint returned 401, refreshing token and retrying');
+                await this.refreshAccessToken();
+                return this.getSpotifyLyrics(trackId, false);
+            }
+
+            if (response.status < 200 || response.status >= 300) {
+                const detail = typeof response.data === 'string' ? response.data.slice(0, 200) : '';
+                this.logger.warn(`[SpotifyAPI] Spotify lyrics request failed: HTTP ${response.status}${detail ? ` - ${detail}` : ''}`);
+                return null;
+            }
+
+            const lyrics = response.data?.lyrics;
+            const rawLines = Array.isArray(lyrics?.lines) ? lyrics.lines : [];
+            if (!rawLines.length) return null;
+
+            const lines = rawLines
+                .map((line, index) => {
+                    const text = String(line?.words || '').trim();
+                    if (!text) return null;
+
+                    const startMs = Number(line?.startTimeMs);
+                    const nextStartMs = Number(rawLines[index + 1]?.startTimeMs);
+                    const explicitEndMs = Number(line?.endTimeMs);
+                    const durationMs = Number.isFinite(explicitEndMs) && explicitEndMs > startMs
+                        ? explicitEndMs - startMs
+                        : Number.isFinite(nextStartMs) && nextStartMs > startMs
+                            ? nextStartMs - startMs
+                            : 4000;
+
+                    return {
+                        startMs: Number.isFinite(startMs) ? Math.max(0, startMs) : 0,
+                        durationMs: Math.max(1, durationMs),
+                        glyphs: [{ text, offsetMs: 0, durationMs: Math.max(1, durationMs) }],
+                        raw: text
+                    };
+                })
+                .filter(Boolean);
+
+            if (!lines.length) return null;
+
+            return {
+                source: 'spotify',
+                wordSynced: false,
+                originalXml: '',
+                translationXml: null,
+                romanizationXml: null,
+                lines,
+                translationLines: [],
+                romanizationLines: [],
+                songId: trackId,
+                songMid: '',
+                syncType: lyrics?.syncType || null
+            };
+        } catch (err) {
+            this.logger.warn(`[SpotifyAPI] Spotify lyrics request failed: ${err.message}`);
+            return null;
+        }
+    }
+
+    /**
      * Get current user profile
      */
     async getCurrentUser() {
